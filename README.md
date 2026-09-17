@@ -12,6 +12,7 @@
 3. [Pre-Download Memory Estimation & Sizing Formulas](#3-pre-download-memory-estimation--sizing-formulas)
 4. [Modern Inference Engines & Serving Configurations](#4-modern-inference-engines--serving-configurations)
    - [vLLM on AMD ROCm (RDNA 2 / Navi 23 / `gfx1030`)](#41-vllm-on-amd-rocm-rdna-2--navi-23--gfx1030)
+   - [Subagent Latency & The Root Prefix Invariant](#411-subagent-latency--the-root-prefix-invariant-rule)
    - [Hybrid CPU/GPU Mixture-of-Experts (FreeToken)](#42-hybrid-cpugpu-mixture-of-experts-freetoken)
    - [Ollama & Fast Sizing with `llmfit`](#43-ollama--fast-sizing-with-llmfit)
 5. [Agentic Fine-Tuning: The 4-Dial Governance SOP](#5-agentic-fine-tuning-the-4-dial-governance-sop)
@@ -20,12 +21,14 @@
    - [Dial 3: Runtime Temperature & Deterministic Fallback Retries](#dial-3-runtime-temperature--deterministic-fallback-retries)
    - [Dial 4: Direct Preference Optimization (DPO) for Judgment Calls](#dial-4-direct-preference-optimization-dpo-for-judgment-calls)
    - [The Verdict Gate: Mitigating Catastrophic Forgetting](#the-verdict-gate-mitigating-catastrophic-forgetting)
-6. [Data Preparation for LLMs (NLP vs. Computer Vision)](#6-data-preparation-for-llms-nlp-vs-computer-vision)
-7. [Host Hardening & System Freeze Immunity (Linux/Zorin/Ubuntu)](#7-host-hardening--system-freeze-immunity-linuxzorinubuntu)
-   - [Out-Of-Memory Protection (`earlyoom`)](#71-out-of-memory-protection-earlyoom)
-   - [Kernel Virtual Memory Tuning (`sysctl`)](#72-kernel-virtual-memory-tuning-sysctl)
-   - [Secondary Storage Offloading (`HF_HOME`)](#73-secondary-storage-offloading-hf_home)
-8. [Quick-Reference Cheat Sheet (Reddit / GitHub Copy-Paste)](#8-quick-reference-cheat-sheet)
+6. [Scoping Local Coding Models: The 4-Pillar Domain Glossary Pattern](#6-scoping-local-coding-models-the-4-pillar-domain-glossary-pattern)
+7. [Real-World Edge Workflows: Safe Local File & Document Organization (The Staged Mirror Pattern)](#7-real-world-edge-workflows-safe-local-file--document-organization-the-staged-mirror-pattern)
+8. [Data Preparation for LLMs (NLP vs. Computer Vision)](#8-data-preparation-for-llms-nlp-vs-computer-vision)
+9. [Host Hardening & System Freeze Immunity (Linux/Zorin/Ubuntu)](#9-host-hardening--system-freeze-immunity-linuxzorinubuntu)
+   - [Out-Of-Memory Protection (`earlyoom`)](#91-out-of-memory-protection-earlyoom)
+   - [Kernel Virtual Memory Tuning (`sysctl`)](#92-kernel-virtual-memory-tuning-sysctl)
+   - [Secondary Storage Offloading (`HF_HOME`)](#93-secondary-storage-offloading-hf_home)
+10. [Quick-Reference Cheat Sheet (Reddit / GitHub Copy-Paste)](#10-quick-reference-cheat-sheet)
 
 ---
 
@@ -150,6 +153,21 @@ vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ \
 * `--enforce-eager`: Disables HIP Graph capture. Crucial for consumer AMD cards to prevent kernel compilation hangs during startup.
 * `--enable-prefix-caching`: Reuses pre-computed KV-cache for repeated system prompts and multi-turn chat turns, cutting prompt prefill latency by over 80%.
 
+#### 4.1.1 Subagent Latency & The Root Prefix Invariant Rule
+A common pitfall when building iterative agent loops (where the model calls tools and receives output across multiple turns) is **silent prefix cache invalidation**.
+
+PagedAttention in vLLM hashes prompt tokens starting strictly from token `0`. If your application dynamically injects:
+* Dynamic timestamps (e.g., `Current time: 2026-09-16 21:00:00`)
+* Runtime UUIDs or volatile session identifiers
+* Changing turn counters or ephemeral memory tags
+
+...into the root `system` prompt block, token 0's hash changes on **every single turn**. This completely invalidates the KV cache, forcing a 100% prefill recomputation on every subagent response.
+
+**The Golden Invariant Rule:**
+1. **Freeze Index 0:** Keep the root `system` message (agent persona, static tool schemas, operational directives) strictly static and immutable.
+2. **Move Dynamic Context to User Turns:** Place timestamps, task arguments, and transient runtime metadata in the first `user` message or subsequent message envelopes.
+3. **The Empirical Impact:** In a 10-turn subagent execution loop with a 500-token system prompt, preserving the static prefix saves **4,500 redundant prefill token evaluations**, slashing agent response latency by over **80%**.
+
 ---
 
 ### 4.2 Hybrid CPU/GPU Mixture-of-Experts (FreeToken)
@@ -252,7 +270,65 @@ $$\Delta_{\text{general}} = \text{Score}_{\text{base}} - \text{Score}_{\text{ada
 
 ---
 
-## 6. Data Preparation for LLMs (NLP vs. Computer Vision)
+## 6. Scoping Local Coding Models: The 4-Pillar Domain Glossary Pattern
+
+The number one complaint when delegating programming tasks to local models (7B–27B) is **unbounded context dilution**. Expecting a local model to parse an entire multi-file codebase and generate working code without hallucinations or invalid module imports inevitably produces broken syntax.
+
+Production engineers shipping real products with local models don't rely on model scale—they rely on **upfront specification bounding**.
+
+Before delegating code generation to a local model, scaffold a **1-page Feature Domain Glossary** defining four unambiguous pillars:
+
+```mermaid
+flowchart TD
+    A["Feature Domain Glossary"] --> B["1. Symbol & Entity Catalog"]
+    A --> C["2. Permitted & Restricted Imports"]
+    A --> D["3. Pre-conditions & Post-conditions"]
+    A --> E["4. Workspace Boundary Sandbox"]
+```
+
+1. **Symbol & Entity Catalog:** Explicitly define class names, method signatures, and Pydantic/TypeScript interfaces. Never ask the model to guess return structures.
+2. **Permitted & Restricted Imports:** Explicitly whitelist installed libraries (e.g., `pydantic`, `httpx`). Ban speculative packages (`numpy`, `requests`) unless explicitly requested. Require `# type: ignore` annotations on optional/dynamic imports to prevent IDE linter errors.
+3. **Pre-conditions & Post-conditions:** State exact input validation invariants, required return types, and explicit exceptions (`ValueError`, `FileNotFoundError`) instead of returning `None`.
+4. **Workspace Boundary Sandbox:** Confine the local model strictly to a single target file (e.g., `execution/my_tool.py`). Forbid modifying global configurations or unrelated modules.
+
+*The Impact:* By feeding the local model only the 1-page Domain Glossary (< 1,500 tokens) plus the target function skeleton, 7B–27B models achieve near-frontier deterministic code quality with zero context drift.
+
+---
+
+## 7. Real-World Edge Workflows: Safe Local File & Document Organization (The Staged Mirror Pattern)
+
+A frequent question from practitioners is: *"Can I use local LLMs to organize my desktop, sort invoices, and manage local files?"*
+
+### Why Probabilistic LLMs Fail at Direct File Management
+Granting an LLM direct access to execute raw shell commands (`mv`, `rm`, `cp`) inevitably results in broken paths, accidental overwrites, and data loss.
+
+### The Solution: The Two-Phase Staged Manifest Pattern
+Separate probabilistic understanding from deterministic filesystem operations:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Phase 1: Local LLM Extraction (Dry-Run Only)                │
+│ • Model reads document snippet or filename.                │
+│ • Extracts {vendor, date, category} into pure JSON.        │
+│ • Generates action manifest in .tmp/triage_manifest.json.   │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│ Phase 2: Deterministic Python Execution (Verified Apply)    │
+│ • SHA-256 pre-hashed at source.                             │
+│ • Safe byte-stream copy to target destination.             │
+│ • SHA-256 post-hashed at destination.                       │
+│ • Source deleted ONLY if source_hash == target_hash.        │
+│ • If collision exists with different content:               │
+│   appends timestamp suffix (_conflict_YYYYMMDD_HHMMSS).     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+By enforcing SHA-256 pre/post equality checks and zero-overwrite collision renaming, local file triage becomes 100% fail-safe, repeatable, and completely reversible.
+
+---
+
+## 8. Data Preparation for LLMs (NLP vs. Computer Vision)
 
 Computer vision transformations (rotation, color jitter, affine warping) corrupt tokenized text. For LLMs, data augmentation and preparation must follow NLP-native paradigms:
 
@@ -270,11 +346,11 @@ Computer vision transformations (rotation, color jitter, affine warping) corrupt
 
 ---
 
-## 7. Host Hardening & System Freeze Immunity (Linux/Zorin/Ubuntu)
+## 9. Host Hardening & System Freeze Immunity (Linux/Zorin/Ubuntu)
 
 When running near the memory ceiling (e.g., 7.5 GB / 8 GB VRAM, 15 GB / 16 GB RAM), a sudden burst in context length will trigger swapping. Under default Linux desktop configurations, the kernel begins thrashing swap pages to disk, completely freezing the mouse and display for 5–10 minutes.
 
-### 7.1 Out-Of-Memory Protection (`earlyoom`)
+### 9.1 Out-Of-Memory Protection (`earlyoom`)
 Unlike the default kernel OOM killer (which only wakes up after the desktop has already locked up), `earlyoom` monitors memory availability every second and sends `SIGTERM`/`SIGKILL` to designated LLM daemons before the kernel hangs.
 
 ```bash
@@ -288,7 +364,7 @@ sudo sed -i 's/EARLYOOM_ARGS=""/EARLYOOM_ARGS="-m 5 -s 10 -r 60 --prefer '\''(ll
 sudo systemctl enable --now earlyoom
 ```
 
-### 7.2 Kernel Virtual Memory Tuning (`sysctl`)
+### 9.2 Kernel Virtual Memory Tuning (`sysctl`)
 Ubuntu and Zorin OS default to `vm.swappiness = 60`, which aggressively swaps cached model weights to disk during token generation.
 
 Apply optimized parameters:
@@ -302,7 +378,7 @@ echo -e "vm.swappiness=10\nvm.vfs_cache_pressure=50" | sudo tee /etc/sysctl.d/99
 * `vm.swappiness=10`: Forces Linux to keep model tensors in physical DDR4 RAM until RAM is genuinely exhausted.
 * `vm.vfs_cache_pressure=50`: Prevents the OS from prematurely evicting file system directory and inode caches during weight loading.
 
-### 7.3 Secondary Storage Offloading (`HF_HOME`)
+### 9.3 Secondary Storage Offloading (`HF_HOME`)
 HuggingFace and vLLM cache weights in `~/.cache/huggingface/` on the root partition (`/`). Downloading multiple 7B–14B models will quickly fill your root disk, breaking your desktop OS.
 
 Redirect model caches to a secondary drive:
@@ -316,7 +392,7 @@ export HF_HOME=/mnt/secondary_storage/huggingface_cache
 
 ---
 
-## 8. Quick-Reference Cheat Sheet
+## 10. Quick-Reference Cheat Sheet
 
 ### Serving One-Liners (vLLM ROCm AMD RX 6650 XT / 8GB)
 ```bash
