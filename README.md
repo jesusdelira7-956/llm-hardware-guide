@@ -1,6 +1,8 @@
 # Optimizing Large Language Models for Custom & Consumer Hardware: The Practical Engineering Guide
 
 > **Author's Note:** This guide is written for practitioners running or fine-tuning local LLMs on consumer-tier and custom hardware (e.g., 8 GB – 16 GB VRAM, AMD ROCm / NVIDIA, 16 GB – 32 GB DDR4/DDR5 system RAM). It ditches generic textbook fluff in favor of hard benchmark telemetry, exact serving configurations, hardware bandwidth math ($q^\star$ theory), and Linux freeze-hardening.
+>
+> 🌐 **Community Benchmarks:** Verified telemetry profile and real-world hardware setup cataloged on [vram.wiki](https://vram.wiki) under the AMD Radeon RX 6650 XT + Ryzen 5 5500 + Hybrid MoE configuration.
 
 ---
 
